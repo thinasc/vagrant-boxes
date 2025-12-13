@@ -1,0 +1,42 @@
+version: "3"
+
+env:
+  VAGRANT_CLOUD_URL: "https://forgejo.homelab.thinasc.com/api/packages/thinasc/vagrant"
+  BOX_TAG: "arch64"
+  VERSION:
+    sh: date +"%Y.%m"
+  PROVIDER: "virtualbox"
+  ROOT_DIR: "{{.PWD}}"
+  OUTPUT_DIR: "{{.ROOT_DIR}}/output"
+  DIST_DIR: "{{.ROOT_DIR}}/dist"
+
+tasks:
+  build:
+    env:
+      PACKER_DIR: "{{.ROOT_DIR}}/packer"
+      PACKER_CACHE_DIR: "{{.ROOT_DIR}}/.packer_cache"
+      PKR_VAR_build_name: "{{.BOX_TAG}}"
+      PKR_VAR_build_version: "{{.VERSION}}"
+      PKR_VAR_build_cpus: 8
+      PKR_VAR_build_memory: 8192
+      PKR_VAR_boot_wait_time: 60
+      PKR_VAR_image_cpus: 1
+      PKR_VAR_image_memory: 1024
+    cmds:
+      - rm -rf "$OUTPUT_DIR" "$DIST_DIR"
+      - mkdir -p "$OUTPUT_DIR" "$DIST_DIR"
+
+      - packer init -upgrade "$PACKER_DIR/plugins.pkr.hcl"
+      - packer build "$PACKER_DIR"
+
+      - mv "$OUTPUT_DIR"/* "$DIST_DIR"
+
+  deploy:
+    env:
+      FORGEJO_USER: "thinasc"
+      ORIGIN: "{{.DIST_DIR}}/{{.BOX_TAG}}_{{.VERSION}}_{{.PROVIDER}}.box"
+      DESTIN: "{{.VAGRANT_CLOUD_URL}}/{{.BOX_TAG}}/{{.VERSION}}/{{.PROVIDER}}.box"
+    cmds:
+      - echo "Deploy Started..."
+      - ./deploy.sh
+      - echo "Deploy Finished!"
