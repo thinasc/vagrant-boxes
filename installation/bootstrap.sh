@@ -3,66 +3,68 @@
 
 set -e
 
+################################
+# Variables
+################################
+DISK=/dev/nvme0n1
+EFI_PARTITION="${DISK}p1"
+BTRFS_PARTITION="${DISK}p2"
+
 PACKAGES=(
-  linux-lts                  # LTS Kernel
+  linux-lts linux-firmware   # LTS Kernel
   base base-devel            # Base Packages
-  grub                       # Boot
+  btrfs-progs                # File System
+  efibootmgr grub            # Boot
+  zram-generator             # Swap
   openssh wget curl sudo git # Tools
   virtualbox-guest-utils-nox # Guest Additions
-  # ansible   # Provisioner
-  # go   # YaY Dependency
-  # efibootmgr grub   # Boot
-  # btrfs-progs e2fsprogs dosfstools   # File System
 )
 
-# Mounting
-swapon /dev/sda1
-mount /dev/sda2 /mnt
+################################
+# Mount & Btrfs Setup
+################################
+mkdir -p /mnt
+mount -t btrfs "$BTRFS_PARTITION" /mnt
 
-echo "disable-keyserver-lookup" >>~/.gnupg/gpg.conf
+for sub in @ @home @var; do
+  btrfs subvolume create "/mnt/$sub" || true
+done
 
-# Reinitialize the pacman keyring
+umount /mnt
+
+# Mount root subvolume
+mount -t btrfs -o noatime,compress=zstd,space_cache=v2,subvol=@ "$BTRFS_PARTITION" /mnt
+
+# Create directories for other subvolumes
+mkdir -p /mnt/{boot,home,var}
+
+# Mount subvolumes
+mount -t btrfs -o noatime,compress=zstd,space_cache=v2,subvol=@home "$BTRFS_PARTITION" /mnt/home
+mount -t btrfs -o noatime,compress=zstd,space_cache=v2,subvol=@var "$BTRFS_PARTITION" /mnt/var
+
+################################
+# Mount EFI
+################################
+mkdir -p /mnt/boot
+mount -t vfat "$EFI_PARTITION" /mnt/boot
+
+################################
+# Pacstrap
+################################
 pacman-key --init
-
-# Populate the Arch Linux keyring
 pacman-key --populate archlinux
-
-# Refresh the keys
 pacman-key --refresh-keys
 
-pacman -Sy --noconfirm reflector
-
-# Pacstrapping
 pacstrap -K /mnt "${PACKAGES[@]}"
+genfstab -U /mnt >>/mnt/etc/fstab
 
-# Generating fstab
-genfstab -U -p /mnt >>/mnt/etc/fstab
+################################
+# Base System Configuration
+################################
+arch-chroot /mnt /bin/bash <<EOF
+set -e
 
-# Setup Pacman
-arch-chroot /mnt /bin/bash -e <<EOF
-sed -i "/^#.*CheckSpace/s/^#//" /etc/pacman.conf
-sed -i "/^#.*Color/s/^#//" /etc/pacman.conf
-sed -i "/^#.*ParallelDownloads = 5/s/^#//" /etc/pacman.conf
-sed -i "/^#.*VerbosePkgLists/s/^#//" /etc/pacman.conf
-# sed -i "/^#NoExtract/s/^#//" /etc/pacman.conf
-# sed -i "/^NoExtract /s/$/ pacman-mirrorlist/" /etc/pacman.conf
-EOF
-
-# Setup Mirror List to Geo IP Mirrors
-# arch-chroot /mnt /bin/bash -e <<EOF
-# echo "# Ireland" > /etc/pacman.d/mirrorlist
-# echo "Server = http://ftp.heanet.ie/mirrors/ftp.archlinux.org/$repo/os/$arch" >> /etc/pacman.d/mirrorlist
-# echo "Server = https://ftp.heanet.ie/mirrors/ftp.archlinux.org/$repo/os/$arch" >> /etc/pacman.d/mirrorlist
-# echo "" >> /etc/pacman.d/mirrorlist
-# echo "# United Kingdom" >> /etc/pacman.d/mirrorlist
-# echo "Server = http://archlinux.uk.mirror.allworldit.com/archlinux/$repo/os/$arch" >> /etc/pacman.d/mirrorlist
-# echo "Server = https://archlinux.uk.mirror.allworldit.com/archlinux/$repo/os/$arch" >> /etc/pacman.d/mirrorlist
-# EOF
-
-arch-chroot /mnt /bin/bash -e <<EOF
-# timedatectl set-ntp 1
-# timedatectl set-timezone Europe/Dublin
-# ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
+# Time & Locale
 ln -sf /usr/share/zoneinfo/Europe/Dublin /etc/localtime
 hwclock --systohc
 
@@ -72,72 +74,106 @@ locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
 echo "KEYMAP=us" > /etc/vconsole.conf
 
+# Host
 echo "vagrant" > /etc/hostname
-echo "127.0.0.1   localhost" >> /etc/hosts
-echo "::1         localhost" >> /etc/hosts
+cat <<HOSTS > /etc/hosts
+127.0.0.1 localhost
+::1       localhost
+HOSTS
+
+# Pacman UX
+sed -i "/^#.*CheckSpace/s/^#//" /etc/pacman.conf
+sed -i 's/^#Color/Color/' /etc/pacman.conf
+sed -i 's/^#ParallelDownloads.*/ParallelDownloads = 5/' /etc/pacman.conf
+sed -i "/^#.*VerbosePkgLists/s/^#//" /etc/pacman.conf
+
+# mkinitcpio
+sed -i 's/^MODULES=.*/MODULES=(btrfs)/' /etc/mkinitcpio.conf
+mkinitcpio -P
 EOF
 
-# Generating GRUB
-arch-chroot /mnt /bin/bash -e <<EOF
-mkinitcpio -p linux-lts
-grub-install /dev/sda
-grub-mkconfig -o /boot/grub/grub.cfg
+################################
+# Bootloader (UEFI / GRUB)
+################################
+arch-chroot /mnt grub-install \
+  --target=x86_64-efi \
+  --efi-directory=/boot \
+  --bootloader-id=GRUB \
+  --removable
+
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+################################
+# Network (systemd-networkd)
+################################
+cat >/mnt/etc/systemd/network/80-dhcp.network <<'EOF'
+[Match]
+Name=en*
+Name=eth*
+
+[Network]
+DHCP=yes
 EOF
 
-# Setup DHCP Network
-arch-chroot /mnt /bin/bash -e <<EOF
-echo "[Match]" > /etc/systemd/network/80-dhcp.network 
-echo "Name=en*" >> /etc/systemd/network/80-dhcp.network
-echo "Name=eth*" >> /etc/systemd/network/80-dhcp.network
-echo "" >> /etc/systemd/network/80-dhcp.network
-echo "[Network]" >> /etc/systemd/network/80-dhcp.network
-echo "DHCP=yes" >> /etc/systemd/network/80-dhcp.network
-EOF
-
-# Setup Users
-arch-chroot /mnt /bin/bash -e <<EOF
+################################
+# Users & sudo
+################################
+arch-chroot /mnt /bin/bash <<'EOF'
 useradd -m -U vagrant
 echo "vagrant:vagrant" | chpasswd
 echo "root:root" | chpasswd
+
+echo "vagrant ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/vagrant
+chmod 0440 /etc/sudoers.d/vagrant
 EOF
 
-# Setup Sudoers
-arch-chroot /mnt /bin/bash -e <<EOF
-echo "vagrant ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers
-echo "root ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-EOF
-
-# Install Vagrant SSH Key
-arch-chroot /mnt /bin/bash -e <<EOF
-install --directory --owner=vagrant --group=vagrant --mode=0700 /home/vagrant/.ssh
-curl --output /home/vagrant/.ssh/authorized_keys --location https://github.com/hashicorp/vagrant/raw/main/keys/vagrant.pub
+################################
+# Vagrant SSH Key
+################################
+arch-chroot /mnt /bin/bash <<'EOF'
+install -d -m 700 -o vagrant -g vagrant /home/vagrant/.ssh
+curl -fsSL https://github.com/hashicorp/vagrant/raw/main/keys/vagrant.pub \
+  -o /home/vagrant/.ssh/authorized_keys
 # WARNING: Please only update the hash if you are 100% sure it was intentionally updated by upstream.
 sha256sum -c <<< "55009a554ba2d409565018498f1ad5946854bf90fa8d13fd3fdc2faa102c1122 /home/vagrant/.ssh/authorized_keys"
 chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
-chmod 0600 /home/vagrant/.ssh/authorized_keys
+chmod 600 /home/vagrant/.ssh/authorized_keys
 EOF
 
-# Enabling Important Services
-arch-chroot /mnt /bin/bash -e <<EOF
-source /etc/profile
-systemctl daemon-reload
-systemctl enable sshd
-systemctl enable systemd-networkd
-systemctl enable systemd-resolved
-systemctl enable systemd-timesyncd
-systemctl enable systemd-time-wait-sync
-systemctl enable vboxservice.service
+################################
+# Enable Services
+################################
+arch-chroot /mnt systemctl enable \
+  sshd \
+  systemd-networkd \
+  systemd-resolved \
+  systemd-timesyncd \
+  vboxservice.service
+
+################################
+# ZRAM (4G, Clean & Official)
+################################
+cat >/mnt/etc/systemd/zram-generator.conf <<'EOF'
+[zram0]
+zram-size = min(ram / 4, 2048)
+compression-algorithm = zstd
+swap-priority = 100
 EOF
 
-# Setup resolvconf
-arch-chroot /mnt /bin/bash -e <<EOF
-echo "nameserver 1.1.1.1" > /etc/resolv.conf
-EOF
+echo "vm.swappiness=10" >/mnt/etc/sysctl.d/99-swappiness.conf
 
-# Setup YaY
-arch-chroot /mnt /bin/bash -e <<EOF
-su - vagrant
-git clone https://aur.archlinux.org/yay.git /tmp/yay
-cd /tmp/yay
-makepkg -fsri --noconfirm
-EOF
+################################
+# Install YaY for vagrant user
+################################
+arch-chroot /mnt /bin/bash -c '
+set -e
+if ! command -v yay &>/dev/null; then
+    sudo -u vagrant bash -c "
+        cd /tmp
+        rm -rf yay
+        git clone https://aur.archlinux.org/yay.git
+        cd yay
+        makepkg -fsri --noconfirm
+    "
+fi
+'
