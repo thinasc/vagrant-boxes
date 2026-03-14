@@ -1,6 +1,4 @@
+.envrc
 .packer_cache
 dist
 output
-output-arch64
-
-.envrc

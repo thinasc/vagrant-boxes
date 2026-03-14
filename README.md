@@ -1,76 +1,118 @@
 # Arch Linux Development Box
 
-> A minimalistic Arch Linux-based development Vagrant Box and Template
+> An automated [Arch Linux](https://archlinux.org/)-based Vagrant box for development
 
-This repository contains the build system for a base (Arch Linux)[https://archlinux.org/] - based development virtual machine image.
+This repository contains the full build system for an Arch Linux development VM. It uses **Packer**
+to provision a VirtualBox image from scratch, package it as a `.box` file, and deploy it to a
+self-hosted registry.
 
-This VM can either be used directly or can be customized to suit your needs.
+## Using the box
 
-## Using the bare VM
+You'll need **[Vagrant](https://www.vagrantup.com/)** and
+**[VirtualBox](https://www.virtualbox.org/)**.
 
-To run the VM, you'll need **[Vagrant](https://www.vagrantup.com/)** and **[VirtualBox](https://www.virtualbox.org/)**.
-
-Run the following command to create a new Vagrantfile:
+The box is hosted on a self-hosted [Forgejo](https://forgejo.org/) package registry. Add it to a new
+project:
 
 ```bash
-$ vagrant init thinasc/arch64
+vagrant init thinasc/arch64 --box-version "$(date +%Y.%m)" \
+  --box-url https://forgejo.homelab.thinasc.com/api/packages/thinasc/vagrant
 ```
 
-If you're new to Vagrant, check out the [Vagrant documentation](https://developer.hashicorp.com/vagrant).
-
-## Customizing
-
-If you wish to build a custom base box based on this one, read the [documentation on customization](customization.md).
+If you're new to Vagrant, check out the
+[Vagrant documentation](https://developer.hashicorp.com/vagrant).
 
 ## Building
 
-For building your own image locally, enter the following command:
+You'll need **[Packer](https://www.packer.io/)**, **VirtualBox**, and
+**[Task](https://taskfile.dev/)**.
 
 ```bash
-$ ./build.sh
+task build
 ```
 
-**[Packer](https://www.packer.io/)** is required to build an image in addition to Vagrant and VirtualBox.
+This will:
+
+1. Clean previous build artifacts
+2. Download Packer plugins (`packer init`)
+3. Build the VM from the latest Arch Linux ISO
+4. Package it as `dist/arch64_<YYYY.MM>_virtualbox.box`
+
+## Deploying
+
+To upload the built box to the Forgejo registry:
+
+```bash
+task deploy
+```
+
+Requires a `FORGEJO_TOKEN` environment variable (set via `.envrc`, which is gitignored).
 
 ## Configuration
 
-This base box is designed to be a good starting point for an Arch Linux-based development environment.
+### System
 
-### Configuration
+- **Disk:** 100 GB NVMe (dynamically allocated, TRIM enabled)
+  - 512 MB EFI partition (FAT32)
+  - Remaining space formatted as **btrfs** with subvolumes: `@` (root), `@home`, `@var`
+    - Mount options: `noatime,compress=zstd,space_cache=v2`
+- **Swap:** ZRAM (`min(RAM/4, 4096 MB)`, `zstd` compression) — no swap partition
+- **Firmware:** UEFI, bootloader: GRUB (`x86_64-efi`, `--removable`)
+- **Timezone:** `Europe/Dublin`, locale: `en_US.UTF-8`, keymap: `us`
+- **Hostname:** `vagrant`
+- **Network:** `systemd-networkd` with DHCP on `en*`/`eth*`; IPv6 disabled
+- **Time Sync:** `systemd-timesyncd`
 
-- 64 GB primary disk
-  - Dynamically allocated
-  - 16 GB SWAP
-  - 47,5 GB ROOT (ext4)
-- UTC timezone, `en_US.UTF-8` locale, `us` keymap
-- NTP-synced time
-- Network management using systemd
-- Default hostname: `vagrant`
-- Optimized boot process
-  - Minimal Initrd
-  - No bootloader (EFI booting)
-- Regular mirrorlist updates using Reflector
+### Installed Packages
 
-### Installed packages
+**Base:**
 
-- `linux-lts`
-- `base` (group), `base-devel` (group)
-- `e2fsprogs`, `dosfstools`
-- `efibootmgr`
-- `openssh`
-- `systemd-resolvconf`
-- `reflector`
+- `linux-lts`, `linux-firmware`
+- `base`, `base-devel`
+- `btrfs-progs`
+- `efibootmgr`, `grub`
+- `zram-generator`
+- `openssh`, `wget`, `curl`, `sudo`, `git`
 - `virtualbox-guest-utils-nox`
-- `neovim`
-- `wget`, `curl`
-- `sudo`
-- `git`
-- `man-db`, `man-pages`, `texinfo`
-- `fish`
-- `yay`
 
-## Legal
+**Development Tools:**
 
-This project's configuration files and installation scripts are licensed under the MIT License.
+- `ansible`, `python-requests`
+- `docker` (service enabled, `vagrant` user added to `docker` group)
+- `neovim`, `tree-sitter`, `unzip`
+- `fish` (default shell)
 
-This project is not an official project of the Arch Linux distribution. The Arch Linux name and logo are recognized trademarks. Some rights reserved.
+**Shell & Terminal:**
+
+- `starship`, `tmux`, `tmuxp`, `direnv`, `mise`, `stow`
+- `lazygit`, `git-delta`
+- `fzf`, `fd`, `ripgrep`
+- `zoxide`, `eza`, `bat`, `tree`, `ncdu`, `jq`
+- `htop`, `fastfetch`
+- `bc`, `lsof`
+
+**AUR (via `yay`):**
+
+- `opencode-bin`
+- `tmux-plugin-manager`
+- `tree-sitter-cli`
+
+### Fish Shell
+
+Fish is configured at `/home/vagrant/.config/fish/config.fish` with:
+
+- Hooks for `mise`, `direnv`, `starship`, `zoxide`
+- `TERM=xterm-256color`, `EDITOR=nvim`, `GIT_EDITOR=$EDITOR`
+
+### Vagrant User
+
+- Username: `vagrant`, password: `vagrant`
+- Root password: `root`
+- Full passwordless sudo
+- Vagrant insecure public key pre-installed
+
+## CI/CD
+
+The `.forgejo/workflows/deploy.yml` workflow can be triggered manually. It runs on a self-hosted
+runner, installs all dependencies (VirtualBox 7.1, Packer, Vagrant, Task), then runs
+`task build && task deploy`.
